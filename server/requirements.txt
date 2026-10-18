@@ -1,0 +1,5 @@
+# Librerias de Python que necesita la app
+flask          # framework web (recibe peticiones HTTP)
+pymysql        # conexion de Python con MySQL
+cryptography   # requerida por pymysql para autenticarse en MySQL 8
+tzdata         # zonas horarias (para usar hora de Colombia)

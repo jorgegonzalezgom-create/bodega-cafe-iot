@@ -1,0 +1,48 @@
+# docker-compose.yml: levanta 2 contenedores que trabajan juntos:
+#   - db  -> la base de datos MySQL
+#   - web -> la aplicacion Flask que recibe los datos del ESP32
+# Las variables ${...} se leen del archivo .env
+
+services:
+
+  # ---------- CONTENEDOR 1: BASE DE DATOS ----------
+  db:
+    image: mysql:8.0                 # imagen oficial de MySQL
+    restart: always                  # si se cae, se reinicia solo
+    environment:                     # configuracion inicial de MySQL
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS}   # clave del administrador
+      MYSQL_DATABASE: ${DB_NAME}             # crea la base "bodega_cafe"
+      MYSQL_USER: ${DB_USER}                 # crea el usuario "iot"
+      MYSQL_PASSWORD: ${DB_PASS}             # clave del usuario "iot"
+    volumes:
+      # Guarda los datos fuera del contenedor (no se pierden al reiniciar)
+      - db_data:/var/lib/mysql
+      # Script que crea la tabla la PRIMERA vez que arranca MySQL
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:                     # revisa si MySQL ya esta listo
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      retries: 20
+
+  # ---------- CONTENEDOR 2: APLICACION WEB (FLASK) ----------
+  web:
+    build: ./server                  # se construye con server/Dockerfile
+    restart: always
+    ports:
+      - "5000:5000"                  # puerto VM:contenedor -> http://IP:5000
+    environment:                     # datos para conectarse a MySQL
+      DB_HOST: db                    # "db" = nombre del contenedor de arriba
+      DB_USER: ${DB_USER}
+      DB_PASS: ${DB_PASS}
+      DB_NAME: ${DB_NAME}
+    volumes:
+      # La carpeta data/ del proyecto se conecta con /app/data del contenedor
+      # Ahi Flask guarda el CSV, y tu lo ves en Windows
+      - ./data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy   # espera a que MySQL este listo
+
+# Volumen con nombre donde MySQL guarda sus datos
+volumes:
+  db_data:

@@ -1,0 +1,7 @@
+# Claves y datos privados
+.env
+esp32/**/secrets.h
+# Archivos internos de Vagrant
+.vagrant/
+# Datos generados (el CSV se crea solo al recibir lecturas)
+data/*.csv
