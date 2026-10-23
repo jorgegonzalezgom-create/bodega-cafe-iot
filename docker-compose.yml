@@ -20,7 +20,9 @@ services:
       # Script que crea la tabla la PRIMERA vez que arranca MySQL
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:                     # revisa si MySQL ya esta listo
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      # 127.0.0.1 (TCP) y no "localhost" (socket): la primera vez MySQL arranca un
+      # servidor temporal solo por socket para correr init.sql, y no esta listo aun
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
       interval: 5s
       retries: 20
 
