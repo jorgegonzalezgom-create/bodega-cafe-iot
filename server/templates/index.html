@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bodega de café · Monitoreo</title>
+<meta name="description" content="Temperatura y humedad en vivo de la bodega de café pergamino (ESP32 + DHT11).">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><ellipse cx='12' cy='12' rx='7' ry='10' fill='%23B45309'/><path d='M12 3c-3 4-1 8 0 9s3 5 0 9' stroke='%23FDE68A' stroke-width='1.6' fill='none'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@500;600&family=Fira+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="{{ url_for('static', filename='tablero.css') }}">
+</head>
+<body>
+
+<!-- Iconos SVG (estilo Lucide) que se reutilizan con <use href="#..."> -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-temp" viewBox="0 0 24 24"><path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z"/></symbol>
+  <symbol id="i-hum" viewBox="0 0 24 24"><path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"/></symbol>
+  <symbol id="i-ok" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-alerta" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-espera" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+  <symbol id="i-lista" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
+  <symbol id="i-descargar" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></symbol>
+  <symbol id="i-grano" viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="7" ry="10"/><path d="M12 2c-3 4-1 8 0 10s3 6 0 10"/></symbol>
+</svg>
+
+<!-- Umbrales del caso de uso (vienen de app.py) -->
+<script id="umbrales" type="application/json">{{ umbrales|tojson }}</script>
+
+<main class="contenedor">
+
+  <header class="cabecera">
+    <div class="marca">
+      <svg class="marca-icono" aria-hidden="true"><use href="#i-grano"/></svg>
+      <div>
+        <h1>Bodega de café pergamino</h1>
+        <p class="sub">Monitoreo de temperatura y humedad · ESP32 + DHT11</p>
+      </div>
+    </div>
+    <div class="acciones">
+      <span class="conexion" id="conexion" data-estado="cargando">
+        <span class="punto" aria-hidden="true"></span><span id="conexion-texto">Conectando…</span>
+      </span>
+      <a class="boton" href="/api/lecturas.csv" download>
+        <svg aria-hidden="true"><use href="#i-descargar"/></svg>Descargar CSV
+      </a>
+    </div>
+  </header>
+
+  <noscript><p class="aviso">Activa JavaScript para ver el tablero. Los datos también están en <a href="/api/lecturas">/api/lecturas</a>.</p></noscript>
+
+  <!-- Estado general de la bodega -->
+  <section class="estado" id="estado" data-estado="espera" aria-live="polite" aria-atomic="true">
+    <svg class="estado-icono" aria-hidden="true"><use id="estado-uso" href="#i-espera"/></svg>
+    <div class="estado-texto">
+      <p class="estado-etiqueta">Estado de la bodega</p>
+      <h2 id="estado-titulo">Esperando la primera lectura</h2>
+      <p id="estado-detalle">Conecta el ESP32 o ejecuta el simulador: <code>python simulador/simular_esp32.py</code></p>
+    </div>
+    <p class="estado-hora" id="estado-hora"></p>
+  </section>
+
+  <!-- Indicadores principales -->
+  <section class="indicadores" aria-label="Lectura actual">
+    <article class="tarjeta indicador" data-var="temp" data-fuera="no">
+      <header><svg aria-hidden="true"><use href="#i-temp"/></svg><h3>Temperatura</h3></header>
+      <p class="valor"><span id="temp-valor">—</span><span class="unidad">°C</span></p>
+      <p class="variacion" id="temp-variacion">&nbsp;</p>
+      <div class="medidor" id="temp-medidor" aria-hidden="true"
+           style="--seg-ini: {{ (umbrales.temp_min - 0) / 40 * 100 }}%; --seg-fin: {{ (umbrales.temp_max - 0) / 40 * 100 }}%;">
+        <span class="medidor-seguro"></span><span class="medidor-marca"></span>
+      </div>
+      <p class="rango">Rango seguro: {{ umbrales.temp_min }}–{{ umbrales.temp_max }} °C</p>
+    </article>
+
+    <article class="tarjeta indicador" data-var="hum" data-fuera="no">
+      <header><svg aria-hidden="true"><use href="#i-hum"/></svg><h3>Humedad relativa</h3></header>
+      <p class="valor"><span id="hum-valor">—</span><span class="unidad">%</span></p>
+      <p class="variacion" id="hum-variacion">&nbsp;</p>
+      <div class="medidor" id="hum-medidor" aria-hidden="true"
+           style="--seg-ini: {{ umbrales.hum_min }}%; --seg-fin: {{ umbrales.hum_max }}%;">
+        <span class="medidor-seguro"></span><span class="medidor-marca"></span>
+      </div>
+      <p class="rango">Rango seguro: {{ umbrales.hum_min }}–{{ umbrales.hum_max }} % · más = riesgo de moho</p>
+    </article>
+
+    <article class="tarjeta indicador resumen">
+      <header><svg aria-hidden="true"><use href="#i-lista"/></svg><h3>Resumen reciente</h3></header>
+      <p class="valor"><span id="res-alertas">—</span><span class="unidad" id="res-total"></span></p>
+      <p class="variacion" id="res-porcentaje">&nbsp;</p>
+      <dl class="datos">
+        <div><dt>Dispositivo</dt><dd id="res-dispositivo">—</dd></div>
+        <div><dt>Envía cada</dt><dd>10 s</dd></div>
+      </dl>
+    </article>
+  </section>
+
+  <!-- Graficas: la franja verde es el rango seguro -->
+  <section class="graficas">
+    <article class="tarjeta">
+      <header class="tarjeta-cabecera">
+        <h3>Temperatura (°C)</h3>
+        <p class="leyenda"><span class="muestra muestra-franja"></span>Rango seguro <span class="muestra muestra-alerta"></span>Lectura en alerta</p>
+      </header>
+      <div class="lienzo"><canvas id="grafica-temp" role="img" aria-label="Gráfica de temperatura"></canvas></div>
+    </article>
+    <article class="tarjeta">
+      <header class="tarjeta-cabecera">
+        <h3>Humedad relativa (%)</h3>
+        <p class="leyenda"><span class="muestra muestra-franja"></span>Rango seguro <span class="muestra muestra-alerta"></span>Lectura en alerta</p>
+      </header>
+      <div class="lienzo"><canvas id="grafica-hum" role="img" aria-label="Gráfica de humedad"></canvas></div>
+    </article>
+  </section>
+
+  <!-- Historial -->
+  <section class="tarjeta historial">
+    <header class="tarjeta-cabecera">
+      <h3>Últimas lecturas</h3>
+      <p class="leyenda">Guardadas en MySQL y en <code>data/lecturas.csv</code></p>
+    </header>
+    <div class="tabla-scroll" tabindex="0" role="region" aria-label="Tabla de últimas lecturas">
+      <table>
+        <thead>
+          <tr><th scope="col">Fecha y hora</th><th scope="col">Dispositivo</th><th scope="col" class="num">Temp. (°C)</th><th scope="col" class="num">Humedad (%)</th><th scope="col">Estado</th></tr>
+        </thead>
+        <tbody id="filas">
+          <tr><td colspan="5" class="vacio">Sin lecturas todavía.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="pie">
+    Rango seguro para café pergamino: {{ umbrales.temp_min }}–{{ umbrales.temp_max }} °C y {{ umbrales.hum_min }}–{{ umbrales.hum_max }} % HR ·
+    <a href="/api/lecturas">API JSON</a> · <a href="/health">Estado del servidor</a>
+  </footer>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="{{ url_for('static', filename='tablero.js') }}"></script>
+</body>
+</html>

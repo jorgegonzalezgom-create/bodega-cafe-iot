@@ -1,5 +1,5 @@
-# Librerias de Python que necesita la app
-flask          # framework web (recibe peticiones HTTP)
-pymysql        # conexion de Python con MySQL
-cryptography   # requerida por pymysql para autenticarse en MySQL 8
-tzdata         # zonas horarias (para usar hora de Colombia)
+# Librerias de Python que necesita la app (versiones fijas = siempre se instala lo mismo)
+flask==3.1.3          # framework web (recibe peticiones HTTP)
+pymysql==1.2.3        # conexion de Python con MySQL
+cryptography==50.0.2  # requerida por pymysql para autenticarse en MySQL 8
+tzdata==2026.5        # zonas horarias (para usar hora de Colombia)

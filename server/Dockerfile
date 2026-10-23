@@ -10,8 +10,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. Copia el codigo de la aplicacion
+# 4. Copia el codigo de la aplicacion y el tablero web (HTML, CSS, JS)
 COPY app.py .
+COPY templates/ templates/
+COPY static/ static/
 
 # 5. Comando que se ejecuta al arrancar el contenedor
 CMD ["python", "app.py"]
