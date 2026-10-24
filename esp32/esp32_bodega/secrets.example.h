@@ -2,3 +2,4 @@
 #define WIFI_SSID  "NOMBRE_WIFI"
 #define WIFI_PASS  "CLAVE_WIFI"
 #define SERVER_URL "http://IP_DEL_SERVIDOR:5000/api/lecturas"
+#define MQTT_SERVER "IP_ELASTICA_AWS"

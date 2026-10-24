@@ -5,3 +5,5 @@ esp32/**/secrets.h
 .vagrant/
 # Datos generados (el CSV se crea solo al recibir lecturas)
 data/*.csv
+
+*.pem

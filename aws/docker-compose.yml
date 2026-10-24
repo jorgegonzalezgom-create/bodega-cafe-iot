@@ -1,0 +1,27 @@
+# Servidor IoT (subred publica): Mosquitto + Telegraf + Grafana
+# El token de InfluxDB se lee de aws/.env (no se sube a GitHub)
+services:
+  mosquitto:                      # broker MQTT (puerto 1883)
+    image: eclipse-mosquitto:2
+    restart: always
+    ports: ["1883:1883"]
+    volumes: ["./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf"]
+
+  telegraf:                       # MQTT -> InfluxDB (privada) + CSV
+    image: telegraf:1.33
+    restart: always
+    depends_on: [mosquitto]
+    environment:
+      INFLUX_TOKEN: ${INFLUX_TOKEN}
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+      - ./data:/data
+
+  grafana:                        # tablero web (puerto 3000)
+    image: grafana/grafana:latest
+    restart: always
+    ports: ["3000:3000"]
+    volumes: ["grafana_data:/var/lib/grafana"]
+
+volumes:
+  grafana_data:
