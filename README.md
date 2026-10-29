@@ -221,3 +221,174 @@ New-NetFirewallRule -DisplayName "Bodega cafe 5000" -Direction Inbound -Protocol
 - El endpoint `POST /api/lecturas` no pide autenticación: cualquiera en la misma red podría
   enviar lecturas. Para un despliegue real habría que añadir una clave (`X-API-Key`) y HTTPS.
 - Flask corre con su servidor de desarrollo, suficiente para uno o pocos ESP32.
+
+# Despliegue en la nube (AWS)
+Nota: La implementación y la configuración del despliegue vía HTTP (local con Vagrant y Docker, y en AWS con VPC, subred pública y privada) se documentaron en el siguiente repositorio: https://github.com/1alejandraguadir/bodega-cafe-iot
+
+En producción el sistema corre en **AWS** dentro de una **VPC** con dos subredes: el servidor
+web queda en la **subred pública** (accesible por HTTP desde internet) y la base de datos en la
+**subred privada** (sin IP pública, solo el servidor web llega a ella).
+
+![Arquitectura en AWS](docs/arquitectura-aws.png)
+
+```mermaid
+flowchart LR
+    ESP[ESP32 + DHT11] -- "HTTP POST /api/lecturas" --> IGW
+    NAV[Navegador / celular] -- "http://ELASTIC_IP" --> IGW
+    subgraph AWS[AWS · us-east-1]
+      IGW[Internet gateway]
+      subgraph VPC[VPC bodega · 10.0.0.0/16]
+        subgraph PUB[Subred pública]
+          WEB[EC2 iot-server<br/>Docker · Flask :80]
+          NAT[NAT gateway]
+        end
+        subgraph PRIV[Subred privada]
+          DB[(EC2 iot-db<br/>Docker · MySQL 8 :3306)]
+        end
+      end
+    end
+    IGW --> WEB
+    WEB -- "3306" --> DB
+    DB -- "salida a internet<br/>(apt, docker pull)" --> NAT --> IGW
+    WEB --> CSV[data/lecturas.csv]
+```
+
+### Componentes
+
+| Componente | Dónde | Para qué |
+|---|---|---|
+| **VPC** `bodega-vpc` | `10.0.0.0/16`, 1 zona de disponibilidad | Red aislada del proyecto |
+| **Internet gateway** | VPC | Entrada y salida a internet de la subred pública |
+| **NAT gateway** | Subred pública | Deja que la base de datos descargue paquetes e imágenes sin tener IP pública |
+| **EC2 `iot-server`** | Subred pública, con **Elastic IP** | Contenedor `web` (Flask): recibe lecturas, guarda el CSV y sirve el tablero en el puerto **80** |
+| **EC2 `iot-db`** | Subred privada, **sin IP pública** | Contenedor `db` (MySQL 8) |
+
+Las dos EC2 son Ubuntu Server 24.04 (`t3.micro`) con Docker y Docker Compose.
+
+### Security Groups
+
+| Grupo | Entrada permitida | Origen |
+|---|---|---|
+| `web-sg` (servidor) | HTTP 80 | `0.0.0.0/0` (ESP32 y navegadores) |
+| | SSH 22 | IP del administrador |
+| `db-sg` (base de datos) | MySQL 3306 | Solo `web-sg` |
+| | SSH 22 | Solo `web-sg` (se entra saltando desde el servidor) |
+
+La salida de ambos grupos queda abierta (por defecto) para poder instalar paquetes.
+
+### Archivos de Docker Compose para AWS
+
+En local los dos contenedores corren juntos con `docker-compose.yml`. En AWS se separan en dos
+archivos, uno por máquina:
+
+- **`docker-compose.db.yml`** → se ejecuta en `iot-db`. Levanta MySQL y crea la tabla con `db/init.sql`.
+- **`docker-compose.web.yml`** → se ejecuta en `iot-server`. Levanta Flask publicado en el puerto **80**
+  y se conecta a MySQL usando `DB_HOST` (IP privada de `iot-db`).
+
+No hace falta cambiar código: `server/app.py` ya lee la conexión de las variables
+`DB_HOST`, `DB_USER`, `DB_PASS` y `DB_NAME`.
+
+### Puesta en marcha en AWS
+
+**1. Red (consola de AWS)**
+
+- *VPC → Crear VPC → VPC y más*: nombre `bodega`, 1 AZ, 1 subred pública, 1 subred privada,
+  NAT gateway **Zonal (1 AZ)**, sin endpoints.
+- *EC2 → Security Groups*: crear `web-sg` y `db-sg` con las reglas de la tabla anterior.
+  AWS no permite nombres que empiecen por `sg-`.
+
+**2. Máquinas**
+
+- `iot-server`: Ubuntu 24.04, subred **pública**, IP pública habilitada, grupo `web-sg`.
+  Asociarle una **Elastic IP** para que la dirección no cambie.
+- `iot-db`: Ubuntu 24.04, subred **privada**, IP pública deshabilitada, grupo `db-sg`.
+- Ambas con el mismo par de claves (`.pem`).
+
+**3. Entrar por SSH**
+
+```bash
+# Desde el PC al servidor
+ssh -i bodega-key.pem ubuntu@<ELASTIC_IP>
+
+# Desde el servidor a la base de datos (no tiene IP pública)
+ssh -i bodega-key.pem ubuntu@<IP_PRIVADA_DB>
+```
+
+> En Windows, si SSH responde *UNPROTECTED PRIVATE KEY FILE*, dejar la llave solo para tu usuario:
+> `icacls bodega-key.pem /inheritance:r` y `icacls bodega-key.pem /remove *S-1-5-11 *S-1-5-32-545 *S-1-1-0`.
+
+**4. Instalar Docker (en las dos EC2)**
+
+```bash
+sudo apt update && sudo apt install -y docker.io docker-compose-v2 git
+sudo usermod -aG docker ubuntu
+exit    # volver a entrar para que aplique el permiso
+```
+
+**5. Base de datos (en `iot-db`)**
+
+```bash
+git clone https://github.com/1alejandraguadir/bodega-cafe-iot.git
+cd bodega-cafe-iot
+cp .env.example .env && nano .env      # poner las claves
+docker compose -f docker-compose.db.yml up -d
+```
+
+**6. Servidor web (en `iot-server`)**
+
+```bash
+git clone https://github.com/1alejandraguadir/bodega-cafe-iot.git
+cd bodega-cafe-iot
+cp .env.example .env && nano .env      # mismas claves + DB_HOST=<IP_PRIVADA_DB>
+mkdir -p data
+docker compose -f docker-compose.web.yml up -d --build
+curl http://localhost/health           # {"db":true,"status":"ok"}
+```
+
+### Conectar el ESP32 y el simulador a AWS
+
+En `esp32/esp32_bodega/secrets.h`:
+
+```cpp
+#define SERVER_URL "http://<ELASTIC_IP>/api/lecturas"
+```
+
+A diferencia del modo local, el ESP32 ya no necesita estar en la misma red del PC: basta
+cualquier Wi-Fi de **2,4 GHz** con internet.
+
+Simulador desde el PC:
+
+```bash
+python simulador/simular_esp32.py --url http://<ELASTIC_IP> --cantidad 10 --intervalo 1 --picos
+```
+
+### Verificar en AWS
+
+```bash
+# Tablero
+http://<ELASTIC_IP>
+
+# Lecturas llegando en vivo (en iot-server)
+docker compose -f docker-compose.web.yml logs -f web
+
+# CSV (en iot-server)
+tail data/lecturas.csv
+
+# MySQL (en iot-db)
+docker compose -f docker-compose.db.yml exec db sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SELECT * FROM lecturas ORDER BY id DESC LIMIT 10;"'
+```
+
+En la consola, *VPC → bodega-vpc → Mapa de recursos* muestra las subredes, tablas de rutas,
+internet gateway y NAT.
+
+### Problemas frecuentes en AWS
+
+| Síntoma | Solución |
+|---|---|
+| El navegador se queda cargando con `http://<ELASTIC_IP>` | Falta la regla **HTTP 80** en `web-sg`, o la instancia no tiene asignado `web-sg`. |
+| `/health` responde `"db": false` | Revisar `DB_HOST` y que las claves del `.env` sean iguales en las dos EC2. MySQL tarda unos segundos la primera vez. |
+| `apt update` no avanza en `iot-db` | El NAT gateway no está creado o la subred privada no tiene ruta hacia él. |
+| `curl` responde *Connection reset* justo después de levantar | Flask todavía está arrancando; esperar unos segundos. |
+
+
+
