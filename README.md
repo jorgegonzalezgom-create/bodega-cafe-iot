@@ -9,6 +9,17 @@ Todo el servidor corre en **contenedores Docker** dentro de una **máquina virtu
 
 ![Tablero web de la bodega](docs/tablero.jpg)
 
+## Contenido del repositorio
+
+Un mismo ESP32 alimenta las dos prácticas del curso: cada 10 s envía la lectura por **HTTP**
+(Actividad 1) y por **MQTT** (Actividad 2).
+
+| Actividad | Protocolo | Dónde corre | Almacenamiento | Sección |
+|---|---|---|---|---|
+| **1 · Parte 1** | HTTP | Local (VM Vagrant) | MySQL + CSV | [Puesta en marcha](#puesta-en-marcha) |
+| **1 · Parte 2** | HTTP | AWS (Flask en subred pública, MySQL en privada) | MySQL + CSV | [Despliegue en AWS](#actividad-1--parte-2-despliegue-en-aws-http) |
+| **2** | MQTT | AWS (Mosquitto + Telegraf + Grafana en subred pública, InfluxDB en privada) | InfluxDB + CSV | [Actividad 2](#actividad-2--bróker-mqtt-influxdb-y-grafana-en-aws) |
+
 ---
 
 ## El caso de uso
@@ -27,6 +38,8 @@ Una lectura es **ALERTA** si *cualquiera* de las dos variables sale de su rango.
 La regla está en `calcular_estado()` de [server/app.py](server/app.py).
 
 ## Arquitectura
+
+![Arquitectura local](docs/arquitectura-local.png)
 
 ```mermaid
 flowchart LR
@@ -54,8 +67,11 @@ flowchart LR
 
 ```
 Vagrantfile               VM Ubuntu 24.04 con Docker (puerto 5000 reenviado)
-docker-compose.yml        Contenedores web (Flask) y db (MySQL)
+docker-compose.yml        Act. 1 local: contenedores web (Flask) y db (MySQL)
+docker-compose.web.yml    Act. 1 AWS: Flask en la EC2 pública (puerto 80)
+docker-compose.db.yml     Act. 1 AWS: MySQL en la EC2 privada
 .env.example              Plantilla de claves de la BD (copiar como .env)
+actividad2-mqtt/          Act. 2: Mosquitto, Telegraf, Grafana e InfluxDB en AWS
 server/
   app.py                    Rutas: recibir lecturas, API JSON, CSV, health, tablero
   templates/index.html      Tablero web
@@ -63,10 +79,10 @@ server/
   static/tablero.js         Pide datos cada 5 s y dibuja tarjetas, gráficas y tabla
   Dockerfile, requirements.txt
 db/init.sql               Tabla "lecturas"
-esp32/esp32_bodega/       Código del ESP32 (+ secrets.example.h)
+esp32/esp32_bodega/       Código del ESP32: envía por HTTP y MQTT (+ secrets.example.h)
 simulador/                Script que imita al ESP32 (probar sin hardware)
 data/                     Aquí se genera lecturas.csv (no se sube a git)
-docs/                     Imágenes del README
+docs/                     Diagramas de arquitectura e imágenes del README
 ```
 
 ## Puesta en marcha
@@ -222,8 +238,9 @@ New-NetFirewallRule -DisplayName "Bodega cafe 5000" -Direction Inbound -Protocol
   enviar lecturas. Para un despliegue real habría que añadir una clave (`X-API-Key`) y HTTPS.
 - Flask corre con su servidor de desarrollo, suficiente para uno o pocos ESP32.
 
-# Despliegue en la nube (AWS)
-Nota: La implementación y la configuración del despliegue vía HTTP (local con Vagrant y Docker, y en AWS con VPC, subred pública y privada) se documentaron en el siguiente repositorio: https://github.com/1alejandraguadir/bodega-cafe-iot
+---
+
+# Actividad 1 · Parte 2: despliegue en AWS (HTTP)
 
 En producción el sistema corre en **AWS** dentro de una **VPC** con dos subredes: el servidor
 web queda en la **subred pública** (accesible por HTTP desde internet) y la base de datos en la
@@ -390,5 +407,139 @@ internet gateway y NAT.
 | `apt update` no avanza en `iot-db` | El NAT gateway no está creado o la subred privada no tiene ruta hacia él. |
 | `curl` responde *Connection reset* justo después de levantar | Flask todavía está arrancando; esperar unos segundos. |
 
+---
 
+# Actividad 2 · Bróker MQTT, InfluxDB y Grafana en AWS
+
+El ESP32 **publica** cada lectura por **MQTT** en un bróker **Mosquitto** en AWS. **Telegraf** está
+suscrito al tema, guarda cada dato en **InfluxDB** (base de datos de series de tiempo, en la
+subred privada) y en un **CSV**, y **Grafana** muestra las gráficas.
+
+![Arquitectura MQTT en AWS](docs/arquitectura-mqtt-aws.png)
+
+```mermaid
+flowchart LR
+    ESP[ESP32 + DHT11] -- "MQTT :1883<br/>Elastic IP" --> IGW
+    NAV[Navegador / celular] -- "http://ELASTIC_IP:3000" --> IGW
+    subgraph AWS[AWS · us-east-1]
+      IGW[Internet gateway]
+      subgraph VPC[VPC bodega · 10.0.0.0/16]
+        subgraph PUB[Subred pública · EC2 servidor-iot]
+          MQ[Mosquitto :1883] --> TG[Telegraf]
+          GF[Grafana :3000]
+        end
+        subgraph PRIV[Subred privada · EC2 bd-influxdb]
+          IF[(InfluxDB 2.7 :8086)]
+        end
+      end
+    end
+    IGW --> MQ
+    IGW --> GF
+    TG -- "8086" --> IF
+    TG --> CSV[data/lecturas.csv]
+    GF -- "Flux" --> IF
+```
+
+### Flujo de un dato
+
+1. El ESP32 lee el DHT11, calcula el estado y arma el JSON
+   `{"dispositivo":"esp32-01","temperatura":27.3,"humedad":64.1,"estado":"ALERTA"}`.
+2. Lo **publica** en el tema MQTT hacia la Elastic IP, puerto **1883**.
+3. **Mosquitto** recibe el mensaje y lo entrega a los suscriptores (Telegraf).
+4. **Telegraf** separa los campos y cada 10 s los escribe en **InfluxDB** (IP privada, puerto
+   8086) y en el **CSV**.
+5. **Grafana** consulta InfluxDB con Flux y actualiza las gráficas.
+
+A diferencia de HTTP, el ESP32 no espera respuesta: publica y el bróker reparte el mensaje.
+
+### Componentes
+
+| Componente | Dónde | Para qué |
+|---|---|---|
+| **EC2 `servidor-iot`** | Subred pública, con **Elastic IP** | Docker Compose con Mosquitto, Telegraf y Grafana |
+| **EC2 `bd-influxdb`** | Subred privada, **sin IP pública** | InfluxDB 2.7 en Docker (org `bodega`, bucket `lecturas`) |
+| **NAT gateway** | Subred pública | Deja que la EC2 privada descargue Docker e InfluxDB |
+
+### Security Groups
+
+| Grupo | Puerto | Origen | Para qué |
+|---|---|---|---|
+| `segiotpublico` | 22 | IP del administrador | SSH |
+| | 1883 | `0.0.0.0/0` | MQTT del ESP32 desde cualquier red |
+| | 3000 | `0.0.0.0/0` | Grafana |
+| `seg-influx-privado` | 8086 | Solo `segiotpublico` | Telegraf y Grafana escriben/leen InfluxDB |
+| | 22 | Solo `segiotpublico` | SSH saltando desde el servidor |
+
+### Archivos
+
+```
+actividad2-mqtt/
+  docker-compose.yml        Mosquitto, Telegraf y Grafana (EC2 pública)
+  mosquitto/mosquitto.conf  Configuración del bróker (puerto 1883)
+  telegraf/telegraf.conf    Entrada mqtt_consumer; salidas influxdb_v2 y file (CSV)
+  influxdb/run_influxdb.sh  Crea InfluxDB en la EC2 privada
+  .env.example              INFLUX_TOKEN e INFLUX_PASSWORD (copiar como .env)
+```
+
+### Puesta en marcha
+
+**1. Base de datos (EC2 privada).** Entrar saltando por el servidor público e instalar InfluxDB:
+
+```bash
+# Desde Windows
+ssh -i labsuser.pem -o ProxyCommand="ssh -i labsuser.pem -W %h:%p ubuntu@<ELASTIC_IP>" ubuntu@<IP_PRIVADA_INFLUX>
+
+# En bd-influxdb
+sudo apt update && sudo apt install -y docker.io
+INFLUX_TOKEN=... INFLUX_PASSWORD=... bash run_influxdb.sh
+curl -s localhost:8086/health        # "status":"pass"
+```
+
+**2. Servidor IoT (EC2 pública).** Copiar la carpeta `actividad2-mqtt/`, poner la IP privada de
+InfluxDB en `telegraf/telegraf.conf` y el token en `.env`:
+
+```bash
+sudo apt update && sudo apt install -y docker.io docker-compose-v2
+mkdir -p data && chmod 777 data
+cp .env.example .env && nano .env
+sudo docker compose up -d
+```
+
+**3. Grafana.** Abrir `http://<ELASTIC_IP>:3000` (admin/admin) → *Connections → Data sources →
+InfluxDB* con lenguaje **Flux**, URL `http://<IP_PRIVADA_INFLUX>:8086`, org `bodega`, token y
+bucket `lecturas`. Consulta de ejemplo para un panel:
+
+```
+from(bucket: "lecturas")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "bodega" and r._field == "temperatura")
+```
+
+**4. ESP32.** En `secrets.h` agregar `#define MQTT_SERVER "<ELASTIC_IP>"`. El sketch publica en
+MQTT y envía por HTTP en el mismo ciclo; en el Serial Monitor debe salir `HTTP 201 | MQTT OK`.
+
+### Verificar
+
+```bash
+# Probar el bróker sin ESP32 (en servidor-iot)
+sudo docker compose exec mosquitto mosquitto_pub -t bodegacafe/lecturas \
+  -m '{"dispositivo":"esp32-01","temperatura":24.5,"humedad":70,"estado":"ALERTA"}'
+
+# CSV en vivo (en servidor-iot)
+tail -f data/lecturas.csv
+
+# Últimas lecturas en InfluxDB (en bd-influxdb)
+sudo docker exec influxdb influx query 'from(bucket:"lecturas") |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "bodega")
+  |> pivot(rowKey:["_time"], columnKey:["_field"], valueColumn:"_value")
+  |> sort(columns:["_time"], desc:true) |> limit(n:5)' --org bodega --token <TOKEN>
+```
+
+### Problemas frecuentes
+
+| Síntoma | Solución |
+|---|---|
+| Telegraf: `context deadline exceeded` | Falta la regla **8086** en `seg-influx-privado` con origen `segiotpublico`. |
+| Serial: `MQTT fallo` | El lab de AWS está apagado o falta la regla **1883**. |
+| Grafana sin datos | Consulta Flux vacía o rango de tiempo distinto a *Last 15 minutes*. |
 
