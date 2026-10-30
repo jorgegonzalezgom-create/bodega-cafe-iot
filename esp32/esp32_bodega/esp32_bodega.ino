@@ -1,7 +1,7 @@
 // ===== Librerias =====
 #include <WiFi.h>
-#include <HTTPClient.h>     // Parte 1: HTTP hacia Flask (local)
-#include <PubSubClient.h>   // Parte 2: MQTT hacia Mosquitto (AWS)
+#include <HTTPClient.h>     // Actividad 1: HTTP hacia Flask (local y AWS)
+#include <PubSubClient.h>   // Actividad 2: MQTT hacia Mosquitto (AWS)
 #include <DHT.h>
 #include "secrets.h"        // WiFi, URL local e IP de AWS (no se sube a GitHub)
 
@@ -33,7 +33,19 @@ void conectarMQTT() {
   if (mqtt.connected()) return;
   String id = "esp32-" + String((uint32_t)ESP.getEfuseMac(), HEX);
   Serial.print("Conectando MQTT AWS... ");
-  Serial.println(mqtt.connect(id.c_str()) ? "OK" : "fallo");
+  // Conecta con usuario y clave (el broker no acepta anonimos)
+  Serial.println(mqtt.connect(id.c_str(), MQTT_USER, MQTT_PASS) ? "OK" : "fallo");
+}
+
+// Envia el JSON por HTTP POST a una URL y devuelve el codigo (201 = OK)
+int enviarHTTP(const char* url, const String& json) {
+  HTTPClient http;
+  http.setTimeout(5000);
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST(json);
+  http.end();
+  return code;
 }
 
 void setup() {
@@ -58,17 +70,18 @@ void loop() {
                 ",\"humedad\":" + String(h, 1) +
                 ",\"estado\":\"" + calcularEstado(t, h) + "\"}";
 
-  // 3. PARTE 1: HTTP POST al servidor local (Flask)
-  HTTPClient http;
-  http.setTimeout(3000);                 // si la VM esta apagada, no se queda pegado
-  http.begin(SERVER_URL);
-  http.addHeader("Content-Type", "application/json");
-  int code = http.POST(json);
-  http.end();
+    // 3. ACTIVIDAD 1: HTTP al servidor local y al servidor en AWS
+  int codeLocal = enviarHTTP(SERVER_URL, json);
+  int codeAws   = enviarHTTP(SERVER_URL_AWS, json);
 
-  // 4. PARTE 2: MQTT publish al broker en AWS
-  bool okMqtt = mqtt.publish(topicLecturas, json.c_str());
+  // 4. ACTIVIDAD 2: MQTT al broker en AWS
+  // Topics por variable (estructura bodega1/variable) + lectura completa en JSON
+  bool okMqtt = mqtt.publish("bodega1/temperatura", String(t, 1).c_str())
+             && mqtt.publish("bodega1/humedad",     String(h, 1).c_str())
+             && mqtt.publish("bodega1/estado",      calcularEstado(t, h).c_str())
+             && mqtt.publish("bodega1/lecturas",    json.c_str());
 
-  Serial.printf("%s -> HTTP %d | MQTT %s\n", json.c_str(), code, okMqtt ? "OK" : "fallo");
+  Serial.printf("%s -> Local %d | AWS %d | MQTT %s\n",
+                json.c_str(), codeLocal, codeAws, okMqtt ? "OK" : "fallo");
   delay(10000);
 }

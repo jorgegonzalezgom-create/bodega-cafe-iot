@@ -7,3 +7,4 @@ esp32/**/secrets.h
 data/*.csv
 
 *.pem
+actividad2-mqtt/mosquitto/passwd
