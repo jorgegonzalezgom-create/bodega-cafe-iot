@@ -5,7 +5,10 @@ y las envía cada 10 segundos por **HTTP POST (JSON)** a un servidor **Flask**. 
 clasifica cada lectura como **OK** o **ALERTA**, la guarda en **MySQL** y en un archivo **CSV**,
 y la muestra en un **tablero web** que se actualiza solo.
 
-Todo el servidor corre en **contenedores Docker** dentro de una **máquina virtual Ubuntu** creada con **Vagrant**.
+El servidor corre en **contenedores Docker**: en local dentro de una **máquina virtual Ubuntu**
+creada con **Vagrant**, y en la nube en **AWS** (VPC con subred pública y privada). El mismo
+ESP32 publica además cada lectura por **MQTT** en un bróker **Mosquitto** en AWS, de donde
+**Telegraf** la guarda en **InfluxDB** y **Grafana** la grafica.
 
 ![Tablero web de la bodega](docs/tablero.jpg)
 
@@ -19,6 +22,27 @@ Un mismo ESP32 alimenta las dos prácticas del curso: cada 10 s envía la lectur
 | **1 · Parte 1** | HTTP | Local (VM Vagrant) | MySQL + CSV | [Puesta en marcha](#puesta-en-marcha) |
 | **1 · Parte 2** | HTTP | AWS (Flask en subred pública, MySQL en privada) | MySQL + CSV | [Despliegue en AWS](#actividad-1--parte-2-despliegue-en-aws-http) |
 | **2** | MQTT | AWS (Mosquitto + Telegraf + Grafana en subred pública, InfluxDB en privada) | InfluxDB + CSV | [Actividad 2](#actividad-2--bróker-mqtt-influxdb-y-grafana-en-aws) |
+
+### Un ciclo del ESP32, tres destinos
+
+Cada 10 s el sketch [esp32_bodega.ino](esp32/esp32_bodega/esp32_bodega.ino) lee el DHT11,
+calcula el estado (misma regla que el servidor) y envía la lectura a los tres destinos:
+
+| # | Destino | Cómo | Dirección (en `secrets.h`) | Respuesta esperada |
+|---|---|---|---|---|
+| 1 | Flask local (VM Vagrant) | HTTP POST JSON | `SERVER_URL` → `http://<IP-del-PC>:5000/api/lecturas` | `201` |
+| 2 | Flask en AWS | HTTP POST JSON | `SERVER_URL_AWS` → `http://<ELASTIC_IP>/api/lecturas` | `201` |
+| 3 | Mosquitto en AWS | MQTT con usuario y clave | `MQTT_SERVER`, `MQTT_USER`, `MQTT_PASS` (puerto 1883) | `OK` |
+
+JSON que se envía (por HTTP y en `bodega1/lecturas`):
+
+```json
+{"dispositivo":"esp32-01","temperatura":22.0,"humedad":58.0,"estado":"OK"}
+```
+
+El servidor Flask ignora el campo `estado` y lo vuelve a calcular él mismo. Si un destino está
+apagado (p. ej. el lab de AWS), los otros siguen recibiendo: en el Monitor serie ese destino
+aparece como `-1` (HTTP) o `fallo` (MQTT).
 
 ---
 
@@ -58,7 +82,9 @@ flowchart LR
 - **Vagrant** crea la VM e instala Docker solo. Reenvía el puerto **5000** de Windows a la VM,
   así el ESP32 y el celular llegan al servidor con la IP del PC.
 - **web** (Flask): recibe las lecturas, las guarda y sirve el tablero. Es el único contenedor con puerto publicado.
-- **db** (MySQL 8): **no publica puertos**; solo el contenedor `web` llega a ella por la red interna de Docker.
+- **db** (MySQL 8): no se abre a la red; el contenedor `web` llega a ella por la red interna de Docker.
+  Solo publica el 3306 en `127.0.0.1` para poder revisarla con **MySQL Workbench** desde la misma
+  máquina donde corre Docker (con Vagrant, eso es dentro de la VM).
   La tabla se crea sola la primera vez con [db/init.sql](db/init.sql).
 - **CSV**: la carpeta `data/` del proyecto está montada dentro del contenedor, así que
   `data/lecturas.csv` se ve directamente en Windows (y se abre en Excel).
@@ -141,14 +167,28 @@ pon una de 10 kΩ entre DATA y 3V3.
 1. **Arduino IDE 2.x** → *Preferencias → URLs adicionales*:
    `https://espressif.github.io/arduino-esp32/package_esp32_index.json`, luego en el
    *Gestor de placas* instalar **esp32 (Espressif)** y elegir **ESP32 Dev Module**.
-2. *Gestor de librerías*: **DHT sensor library** (Adafruit), que pide también **Adafruit Unified Sensor**.
+2. *Gestor de librerías*: **DHT sensor library** (Adafruit), que pide también **Adafruit Unified Sensor**,
+   y **PubSubClient** (Nick O'Leary) para MQTT.
 3. Averiguar la IP del PC en la Wi-Fi (`ipconfig` en Windows).
-4. En `esp32/esp32_bodega/` copiar `secrets.example.h` como `secrets.h` y poner la Wi-Fi
-   (**2,4 GHz**: el ESP32 no ve redes de 5 GHz) y `SERVER_URL = "http://<IP-del-PC>:5000/api/lecturas"`.
+4. En `esp32/esp32_bodega/` copiar `secrets.example.h` como `secrets.h` y llenarlo
+   (`secrets.h` no se sube a GitHub):
+
+   ```cpp
+   #define WIFI_SSID  "NOMBRE_WIFI"            // red de 2,4 GHz: el ESP32 no ve redes de 5 GHz
+   #define WIFI_PASS  "CLAVE_WIFI"
+   #define SERVER_URL "http://<IP-del-PC>:5000/api/lecturas"       // Act. 1 local
+   #define SERVER_URL_AWS "http://<ELASTIC_IP>/api/lecturas"       // Act. 1 AWS
+   #define MQTT_SERVER "<ELASTIC_IP_MQTT>"                         // Act. 2
+   #define MQTT_USER "esp32"
+   #define MQTT_PASS "<CLAVE_MQTT_ESP32>"
+   ```
+
+   Si todavía no tienes AWS, deja los valores de ejemplo: el envío local funciona igual.
 5. Subir el sketch y abrir el **Monitor serie a 115200**. Debe mostrar:
 
    ```
-   Enviado {"dispositivo":"esp32-01","temperatura":22.0,"humedad":58.0} -> HTTP 201
+   Conectando MQTT AWS... OK
+   {"dispositivo":"esp32-01","temperatura":22.0,"humedad":58.0,"estado":"OK"} -> Local 201 | AWS 201 | MQTT OK
    ```
 
 ## El tablero
@@ -345,16 +385,18 @@ exit    # volver a entrar para que aplique el permiso
 **5. Base de datos (en `iot-db`)**
 
 ```bash
-git clone https://github.com/1alejandraguadir/bodega-cafe-iot.git
+git clone https://github.com/jorgegonzalezgom-create/bodega-cafe-iot.git
 cd bodega-cafe-iot
 cp .env.example .env && nano .env      # poner las claves
 docker compose -f docker-compose.db.yml up -d
 ```
 
+> `iot-db` no tiene IP pública: `git clone` y `docker pull` salen a internet por el NAT gateway.
+
 **6. Servidor web (en `iot-server`)**
 
 ```bash
-git clone https://github.com/1alejandraguadir/bodega-cafe-iot.git
+git clone https://github.com/jorgegonzalezgom-create/bodega-cafe-iot.git
 cd bodega-cafe-iot
 cp .env.example .env && nano .env      # mismas claves + DB_HOST=<IP_PRIVADA_DB>
 mkdir -p data
@@ -364,14 +406,14 @@ curl http://localhost/health           # {"db":true,"status":"ok"}
 
 ### Conectar el ESP32 y el simulador a AWS
 
-En `esp32/esp32_bodega/secrets.h`:
+En `esp32/esp32_bodega/secrets.h` (el sketch envía a local **y** a AWS en cada ciclo):
 
 ```cpp
-#define SERVER_URL "http://<ELASTIC_IP>/api/lecturas"
+#define SERVER_URL_AWS "http://<ELASTIC_IP>/api/lecturas"
 ```
 
-A diferencia del modo local, el ESP32 ya no necesita estar en la misma red del PC: basta
-cualquier Wi-Fi de **2,4 GHz** con internet.
+Para AWS el ESP32 no necesita estar en la misma red del PC: basta cualquier Wi-Fi de
+**2,4 GHz** con internet. En el Monitor serie debe salir `AWS 201`.
 
 Simulador desde el PC:
 
@@ -406,6 +448,7 @@ internet gateway y NAT.
 | `/health` responde `"db": false` | Revisar `DB_HOST` y que las claves del `.env` sean iguales en las dos EC2. MySQL tarda unos segundos la primera vez. |
 | `apt update` no avanza en `iot-db` | El NAT gateway no está creado o la subred privada no tiene ruta hacia él. |
 | `curl` responde *Connection reset* justo después de levantar | Flask todavía está arrancando; esperar unos segundos. |
+| Serial: `AWS -1` | El lab de AWS está apagado, la Elastic IP cambió o `SERVER_URL_AWS` no termina en `/api/lecturas`. |
 
 ---
 
@@ -444,13 +487,37 @@ flowchart LR
 
 1. El ESP32 lee el DHT11, calcula el estado y arma el JSON
    `{"dispositivo":"esp32-01","temperatura":27.3,"humedad":64.1,"estado":"ALERTA"}`.
-2. Lo **publica** en el tema MQTT hacia la Elastic IP, puerto **1883**.
-3. **Mosquitto** recibe el mensaje y lo entrega a los suscriptores (Telegraf).
+2. Se conecta al bróker (Elastic IP, puerto **1883**) con **usuario y clave** y publica en los temas
+   de la tabla de abajo.
+3. **Mosquitto** comprueba el usuario y entrega el mensaje a los suscriptores (Telegraf).
 4. **Telegraf** separa los campos y cada 10 s los escribe en **InfluxDB** (IP privada, puerto
    8086) y en el **CSV**.
 5. **Grafana** consulta InfluxDB con Flux y actualiza las gráficas.
 
 A diferencia de HTTP, el ESP32 no espera respuesta: publica y el bróker reparte el mensaje.
+
+### Temas MQTT
+
+Estructura `bodega1/<variable>`, para poder suscribirse a una sola variable o a todas con `bodega1/#`:
+
+| Tema | Contenido | Quién lo lee |
+|---|---|---|
+| `bodega1/temperatura` | `22.0` | Cualquier cliente (p. ej. MQTT Explorer) |
+| `bodega1/humedad` | `58.0` | Cualquier cliente |
+| `bodega1/estado` | `OK` o `ALERTA` | Cualquier cliente |
+| `bodega1/lecturas` | JSON completo | **Telegraf** → InfluxDB y CSV |
+
+### Autenticación del bróker
+
+Mosquitto **no acepta clientes anónimos** (`allow_anonymous false` en
+[mosquitto.conf](actividad2-mqtt/mosquitto/mosquitto.conf)). Los usuarios y claves están en
+`actividad2-mqtt/mosquitto/passwd`, que se crea en el servidor con `mosquitto_passwd` y **no se
+sube a GitHub**. Se usan dos usuarios:
+
+| Usuario | Lo usa | Dónde va la clave |
+|---|---|---|
+| `esp32` | El ESP32 (y MQTT Explorer para pruebas) | `MQTT_USER` / `MQTT_PASS` en `secrets.h` |
+| `telegraf` | Telegraf, para suscribirse | `MQTT_TELEGRAF_PASS` en `actividad2-mqtt/.env` |
 
 ### Componentes
 
@@ -475,10 +542,11 @@ A diferencia de HTTP, el ESP32 no espera respuesta: publica y el bróker reparte
 ```
 actividad2-mqtt/
   docker-compose.yml        Mosquitto, Telegraf y Grafana (EC2 pública)
-  mosquitto/mosquitto.conf  Configuración del bróker (puerto 1883)
-  telegraf/telegraf.conf    Entrada mqtt_consumer; salidas influxdb_v2 y file (CSV)
+  mosquitto/mosquitto.conf  Bróker en el puerto 1883, solo con usuario y clave
+  mosquitto/passwd          Usuarios del bróker (se crea en el servidor, no se sube a git)
+  telegraf/telegraf.conf    Entrada mqtt_consumer (bodega1/lecturas); salidas influxdb_v2 y file (CSV)
   influxdb/run_influxdb.sh  Crea InfluxDB en la EC2 privada
-  .env.example              INFLUX_TOKEN e INFLUX_PASSWORD (copiar como .env)
+  .env.example              INFLUX_TOKEN, INFLUX_PASSWORD y MQTT_TELEGRAF_PASS (copiar como .env)
 ```
 
 ### Puesta en marcha
@@ -495,14 +563,34 @@ INFLUX_TOKEN=... INFLUX_PASSWORD=... bash run_influxdb.sh
 curl -s localhost:8086/health        # "status":"pass"
 ```
 
-**2. Servidor IoT (EC2 pública).** Copiar la carpeta `actividad2-mqtt/`, poner la IP privada de
-InfluxDB en `telegraf/telegraf.conf` y el token en `.env`:
+**2. Servidor IoT (EC2 pública).** Traer el repo, poner la IP privada de InfluxDB en
+`urls` de `telegraf/telegraf.conf` y llenar el `.env`:
 
 ```bash
-sudo apt update && sudo apt install -y docker.io docker-compose-v2
+sudo apt update && sudo apt install -y docker.io docker-compose-v2 git
+git clone https://github.com/jorgegonzalezgom-create/bodega-cafe-iot.git
+cd bodega-cafe-iot/actividad2-mqtt
 mkdir -p data && chmod 777 data
-cp .env.example .env && nano .env
+cp .env.example .env && nano .env      # INFLUX_TOKEN, INFLUX_PASSWORD, MQTT_TELEGRAF_PASS
+nano telegraf/telegraf.conf            # urls = ["http://<IP_PRIVADA_INFLUX>:8086"]
+```
+
+Crear los dos usuarios del bróker **antes** de levantar Mosquitto (sin el archivo `passwd` no
+arranca). Cada comando pide la clave dos veces; `-c` crea el archivo, así que va **solo en el
+primero**:
+
+```bash
+sudo docker run --rm -it -v "$PWD/mosquitto:/mosquitto/config" eclipse-mosquitto:2 \
+  mosquitto_passwd -c /mosquitto/config/passwd esp32
+sudo docker run --rm -it -v "$PWD/mosquitto:/mosquitto/config" eclipse-mosquitto:2 \
+  mosquitto_passwd /mosquitto/config/passwd telegraf     # misma clave que MQTT_TELEGRAF_PASS
+```
+
+Levantar los tres contenedores:
+
+```bash
 sudo docker compose up -d
+sudo docker compose logs mosquitto     # debe decir "mosquitto version 2... running"
 ```
 
 **3. Grafana.** Abrir `http://<ELASTIC_IP>:3000` (admin/admin) → *Connections → Data sources →
@@ -515,14 +603,18 @@ from(bucket: "lecturas")
   |> filter(fn: (r) => r._measurement == "bodega" and r._field == "temperatura")
 ```
 
-**4. ESP32.** En `secrets.h` agregar `#define MQTT_SERVER "<ELASTIC_IP>"`. El sketch publica en
-MQTT y envía por HTTP en el mismo ciclo; en el Serial Monitor debe salir `HTTP 201 | MQTT OK`.
+**4. ESP32.** En `secrets.h` poner `MQTT_SERVER` (Elastic IP de `servidor-iot`), `MQTT_USER`
+(`esp32`) y `MQTT_PASS`. El sketch publica en MQTT y envía por HTTP en el mismo ciclo; en el
+Monitor serie debe salir `... | MQTT OK`.
 
 ### Verificar
 
 ```bash
+# Ver en vivo todo lo que publica el ESP32 (en servidor-iot)
+sudo docker compose exec mosquitto mosquitto_sub -u esp32 -P '<CLAVE_ESP32>' -t 'bodega1/#' -v
+
 # Probar el bróker sin ESP32 (en servidor-iot)
-sudo docker compose exec mosquitto mosquitto_pub -t bodegacafe/lecturas \
+sudo docker compose exec mosquitto mosquitto_pub -u esp32 -P '<CLAVE_ESP32>' -t bodega1/lecturas \
   -m '{"dispositivo":"esp32-01","temperatura":24.5,"humedad":70,"estado":"ALERTA"}'
 
 # CSV en vivo (en servidor-iot)
@@ -535,11 +627,17 @@ sudo docker exec influxdb influx query 'from(bucket:"lecturas") |> range(start: 
   |> sort(columns:["_time"], desc:true) |> limit(n:5)' --org bodega --token <TOKEN>
 ```
 
+Desde el PC también se puede usar **MQTT Explorer**: host `<ELASTIC_IP>`, puerto `1883`, usuario
+`esp32` y su clave; deben aparecer los temas bajo `bodega1/`.
+
 ### Problemas frecuentes
 
 | Síntoma | Solución |
 |---|---|
 | Telegraf: `context deadline exceeded` | Falta la regla **8086** en `seg-influx-privado` con origen `segiotpublico`. |
-| Serial: `MQTT fallo` | El lab de AWS está apagado o falta la regla **1883**. |
+| Serial: `MQTT fallo` | El lab de AWS está apagado, falta la regla **1883** o `MQTT_USER`/`MQTT_PASS` no coinciden con el archivo `passwd`. |
+| Mosquitto se reinicia sin parar | No existe `mosquitto/passwd`: crearlo con `mosquitto_passwd` (ver *Puesta en marcha*) y `sudo docker compose restart mosquitto`. |
+| Telegraf: `not authorized` | La clave del usuario `telegraf` en `passwd` no es igual a `MQTT_TELEGRAF_PASS` del `.env`. |
+| Llegan datos a `bodega1/#` pero no a InfluxDB | Telegraf solo lee `bodega1/lecturas`; revisar `sudo docker compose logs telegraf`. |
 | Grafana sin datos | Consulta Flux vacía o rango de tiempo distinto a *Last 15 minutes*. |
 

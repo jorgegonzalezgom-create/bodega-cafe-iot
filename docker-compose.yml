@@ -9,6 +9,8 @@ services:
   db:
     image: mysql:8.0                 # imagen oficial de MySQL
     restart: always                  # si se cae, se reinicia solo
+    ports:
+      - "127.0.0.1:3306:3306"        # solo para ver la BD con Workbench (no se abre a la red)
     environment:                     # configuracion inicial de MySQL
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS}   # clave del administrador
       MYSQL_DATABASE: ${DB_NAME}             # crea la base "bodega_cafe"
