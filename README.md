@@ -641,3 +641,28 @@ Desde el PC también se puede usar **MQTT Explorer**: host `<ELASTIC_IP>`, puert
 | Llegan datos a `bodega1/#` pero no a InfluxDB | Telegraf solo lee `bodega1/lecturas`; revisar `sudo docker compose logs telegraf`. |
 | Grafana sin datos | Consulta Flux vacía o rango de tiempo distinto a *Last 15 minutes*. |
 
+
+### Tablero y alertas en Grafana
+
+![Tablero de Grafana](docs/grafana-tablero.png)
+
+El tablero `bodega de cafe - aws` muestra el **estado** de la última lectura (OK / ALERTA y su
+hora), medidores de **temperatura** y **humedad** actuales, la lista de **alertas activas** y las
+gráficas de los últimos 15 minutos con la franja verde (rango seguro) y roja (riesgo).
+
+**Reglas de alerta** (carpeta `Bodega`, grupo `bodega`, evaluadas cada 10 s):
+
+| Regla | Consulta Flux (campo) | Condición |
+|---|---|---|
+| Humedad alta en bodega | `r._field == "humedad"` → `last()` | **> 65 %** (riesgo de moho) |
+| Temperatura alta en bodega | `r._field == "temperatura"` → `last()` | **> 25 °C** |
+
+**Notificaciones:** las alertas se envían a **Telegram** con un bot propio (*contact point*
+`Telegram bodega`, integración Telegram con el token del bot y el Chat ID). Grafana avisa cuando
+la alerta se dispara (*Firing*) y cuando vuelve a la normalidad (*Resolved*).
+
+![Alerta recibida en Telegram](docs/telegram-alerta.jpg)
+
+Para crear el bot: en Telegram hablar con **@BotFather** → `/newbot` → copiar el token; enviarle
+un mensaje al bot y abrir `https://api.telegram.org/bot<TOKEN>/getUpdates` para ver el Chat ID.
+El token es una clave: no se sube a GitHub.

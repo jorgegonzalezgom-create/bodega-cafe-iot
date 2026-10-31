@@ -1,5 +1,5 @@
 # Servidor IoT (subred publica): Mosquitto + Telegraf + Grafana
-# El token de InfluxDB se lee de aws/.env (no se sube a GitHub)
+# El token de InfluxDB se lee de actividad2-mqtt/.env (no se sube a GitHub)
 services:
   mosquitto:                      # broker MQTT (puerto 1883)
     image: eclipse-mosquitto:2
